@@ -1,0 +1,8 @@
+{
+  "name": "DataInsight Pro",
+  "description": "An intelligent data cleaning, visualization, and presentation tool. Upload Excel files to clean data, get AI-powered insights, and generate PowerPoint presentations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
