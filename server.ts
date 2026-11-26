@@ -4,21 +4,20 @@ dotenv.config();
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const MODEL_NAME = 'gemini-4-hydrogen';
+const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-4-hydrogen';
 
 function getAIClient() {
   const rawKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
   const apiKey = rawKey.trim().replace(/^["']|["']$/g, '');
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     const err = new Error(
-      'Δεν έχει οριστεί έγκυρο GEMINI_API_KEY. Επιλέξτε ή ελέγξτε το API key σας στο Settings > Secrets.'
+      'Δεν έχει οριστεί έγκυρο GEMINI_API_KEY. Ορίστε τη μεταβλητή περιβάλλοντος GEMINI_API_KEY στο .env.local ή στις ρυθμίσεις του server.'
     ) as Error & { status?: number };
     err.status = 401;
     throw err;
@@ -69,14 +68,14 @@ function mapGeminiError(error: unknown): { status: number; message: string } {
     return {
       status: 401,
       message:
-        'Το Gemini API key δεν είναι έγκυρο ή δεν έχει οριστεί. Ελέγξτε ή επιλέξτε ένα έγκυρο κλειδί στο Settings > Secrets.',
+        'Το Gemini API key δεν είναι έγκυρο ή δεν έχει οριστεί. Ελέγξτε τη μεταβλητή περιβάλλοντος GEMINI_API_KEY.',
     };
   }
   if (status === 429 || rawMessage.includes('RESOURCE_EXHAUSTED')) {
     return {
       status: 429,
       message:
-        'Υπέρβαση ορίου αιτημάτων (quota). Δοκιμάστε ξανά σε λίγο ή ελέγξτε το κλειδί σας στο Settings > Secrets.',
+        'Υπέρβαση ορίου αιτημάτων (quota). Δοκιμάστε ξανά σε λίγο ή ελέγξτε το Gemini API key σας.',
     };
   }
   return {
@@ -279,6 +278,7 @@ ${recentHistory ? `Προηγούμενη συνομιλία:\n${recentHistory}\
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

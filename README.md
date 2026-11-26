@@ -1,20 +1,54 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# DataInsight Pro
 
-# Run and deploy your AI Studio app
+Έξυπνη εφαρμογή καθαρισμού δεδομένων, στατιστικής ανάλυσης, διαδραστικών γραφημάτων, AI Insights και αυτόματης δημιουργίας παρουσιάσεων PowerPoint (`.pptx`), Word (`.docx`) και Excel (`.xlsx`) από αρχεία Excel/CSV.
 
-This contains everything you need to run your app locally.
+## Τοπική εκτέλεση (Run Locally)
 
-View your app in AI Studio: https://ai.studio/apps/a64867b7-4165-4f5e-8cd7-0f966ab89fcd
+**Προαπαιτούμενα:** Node.js >= 20
 
-## Run Locally
+1. Εγκατάσταση εξαρτήσεων:
+   ```bash
+   npm install
+   ```
+2. Δημιουργία αρχείου `.env.local` (με βάση το `.env.example`) και προσθήκη του Gemini API key:
+   ```env
+   GEMINI_API_KEY="ΤΟ_API_KEY_ΣΟΥ"
+   ```
+3. Εκκίνηση σε development mode:
+   ```bash
+   npm run dev
+   ```
+4. Άνοιγμα στον browser: `http://localhost:3000`
 
-**Prerequisites:**  Node.js
+### Production build τοπικά
 
+```bash
+npm run build
+NODE_ENV=production npm start
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Deploy στο Cloud
+
+### 1. Deploy στο Render (1-Click Blueprint)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/DXenos1954/datainsight-pro)
+
+1. Πάτησε το κουμπί **Deploy to Render** (ή σύνδεσε το `DXenos1954/datainsight-pro` από το Render Dashboard -> **New +** -> **Blueprint**).
+2. Όρισε τη μεταβλητή περιβάλλοντος `GEMINI_API_KEY` με το κλειδί σου από το Google AI Studio.
+3. Το `render.yaml` ρυθμίζει αυτόματα build, start command και health check (`/api/health`).
+
+### 2. Deploy στο Railway
+
+1. Δημιούργησε νέο project στο Railway από το GitHub repo `DXenos1954/datainsight-pro`.
+2. Το Railway ανιχνεύει αυτόματα το `Dockerfile`.
+3. Πρόσθεσε το `GEMINI_API_KEY` στις **Variables** της υπηρεσίας.
+
+### 3. Deploy στο Google Cloud Run
+
+```bash
+gcloud run deploy datainsight-pro \
+  --source . \
+  --region europe-west1 \
+  --allow-unauthenticated \
+  --set-env-vars GEMINI_API_KEY="ΤΟ_API_KEY_ΣΟΥ"
+```
