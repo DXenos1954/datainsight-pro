@@ -5,6 +5,9 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import { db, sanitizeUser } from './server/db';
+import { AuthedRequest, requireAuth } from './server/auth';
+import { registerPlatformRoutes, registerStripeWebhookRoute } from './server/routes';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,15 +88,40 @@ function mapGeminiError(error: unknown): { status: number; message: string } {
 }
 
 async function startServer() {
+  await db.init();
+
   const app = express();
+  app.set('trust proxy', 1);
+
+  // Register Stripe webhook with raw body BEFORE express.json()
+  registerStripeWebhookRoute(app);
+
   app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, dbEngine: db.getEngine() });
   });
 
-  app.post('/api/analyze', async (req, res) => {
+  // Auth, Billing & Admin APIs
+  registerPlatformRoutes(app, MODEL_NAME);
+
+  app.post('/api/analyze', requireAuth, async (req: AuthedRequest, res) => {
     try {
+      const user = req.user!;
+      const isUnlimited =
+        user.role === 'admin' ||
+        (user.plan === 'pro_monthly' && user.subscriptionStatus === 'active') ||
+        user.credits < 0;
+
+      if (!isUnlimited && user.credits <= 0) {
+        res.status(402).json({
+          error:
+            'Εξαντλήθηκαν οι διαθέσιμες μονάδες AI του λογαριασμού σας. Αναβαθμίστε σε Starter Pack (€20), Pro Pack (€35), Ultimate (€50) ή Pro Monthly (€60/μήνα) για να συνεχίσετε.',
+          code: 'INSUFFICIENT_CREDITS',
+        });
+        return;
+      }
+
       const { headers, computedColStats, sample, rowCount, sheetName, fileName } = req.body ?? {};
       if (!Array.isArray(headers) || headers.length === 0) {
         res.status(400).json({ error: 'Απαιτούνται έγκυρες στήλες δεδομένων για ανάλυση.' });
@@ -221,7 +249,21 @@ ${JSON.stringify(sample, null, 2)}
       }
 
       const parsed = JSON.parse(text);
-      res.json(parsed);
+
+      // Deduct 1 credit for non-unlimited accounts after successful analysis
+      let updatedUser = user;
+      if (!isUnlimited) {
+        const nextCredits = Math.max(0, user.credits - 1);
+        updatedUser = (await db.updateUser(user.id, { credits: nextCredits })) || user;
+      }
+      await db.addLog(
+        user.id,
+        user.email,
+        'analyze',
+        `AI Ανάλυση: ${fileName || 'Dataset'} (${sheetName || 'Sheet1'}, ${rowCount || 0} γραμμές)`
+      );
+
+      res.json({ ...parsed, user: sanitizeUser(updatedUser) });
     } catch (error) {
       console.error('Error in /api/analyze:', error);
       const mapped = mapGeminiError(error);
@@ -229,8 +271,23 @@ ${JSON.stringify(sample, null, 2)}
     }
   });
 
-  app.post('/api/ask', async (req, res) => {
+  app.post('/api/ask', requireAuth, async (req: AuthedRequest, res) => {
     try {
+      const user = req.user!;
+      const isUnlimited =
+        user.role === 'admin' ||
+        (user.plan === 'pro_monthly' && user.subscriptionStatus === 'active') ||
+        user.credits < 0;
+
+      if (!isUnlimited && user.credits <= 0) {
+        res.status(402).json({
+          error:
+            'Δεν έχετε διαθέσιμες μονάδες AI. Αναβαθμίστε το πακέτο σας για να συνεχίσετε τις ερωτήσεις.',
+          code: 'INSUFFICIENT_CREDITS',
+        });
+        return;
+      }
+
       const { question, headers, computedColStats, sample, rowCount, history } = req.body ?? {};
       if (!question || typeof question !== 'string' || !question.trim()) {
         res.status(400).json({ error: 'Παρακαλώ εισάγετε μια ερώτηση.' });
@@ -268,6 +325,8 @@ ${recentHistory ? `Προηγούμενη συνομιλία:\n${recentHistory}\
           },
         })
       );
+
+      await db.addLog(user.id, user.email, 'ask', `AI Q&A: ${question.trim().slice(0, 80)}`);
 
       res.json({ answer: response.text || 'Δεν ήταν δυνατή η δημιουργία απάντησης.' });
     } catch (error) {

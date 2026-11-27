@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 export function createSampleWorkbook(): { workbook: XLSX.WorkBook; fileName: string } {
   const wb = XLSX.utils.book_new();
 
-  const storePerformance = [
+  const storePerformance: (string | number)[][] = [
     ['Κατάστημα', 'Περιφέρεια', 'Έσοδα (€)', 'Κόστος (€)', 'Καθαρό Κέρδος (€)', 'Παραγγελίες', 'Ικανοποίηση (1-5)'],
     ['Αθήνα Κέντρο', 'Αττική', 148500, 91200, 57300, 1840, 4.7],
     ['Μαρούσι', 'Αττική', 132400, 84100, 48300, 1610, 4.6],
@@ -48,6 +48,28 @@ export function createSampleWorkbook(): { workbook: XLSX.WorkBook; fileName: str
   ];
 
   const ws1 = XLSX.utils.aoa_to_sheet(storePerformance);
+
+  // Add real Excel formulas for Καθαρό Κέρδος (=C{r}-D{r}) and Σύνολο (=SUM(...))
+  // Include 2 realistic errors to demonstrate automatic mathematical validation & correction
+  for (let rowNum = 2; rowNum <= 15; rowNum++) {
+    const addr = `E${rowNum}`;
+    const cell = ws1[addr] as XLSX.CellObject;
+    if (cell) {
+      cell.f = `C${rowNum}-D${rowNum}`;
+      // Intentional stale/incorrect cached formula value in row 5 (E5) to demonstrate auto-fix
+      if (rowNum === 5) {
+        cell.v = 49999;
+      }
+    }
+  }
+  // Intentional typo in a numeric cell (F11: "85O" instead of 850 for Βόλος) to demonstrate auto-repair
+  ws1['F11'] = { t: 's', v: '85O' };
+  // Total row Excel formulas (with an intentional stale cached sum in C16)
+  ws1['C16'] = { t: 'n', v: 1350000, f: 'SUM(C2:C15)' };
+  ws1['D16'] = { t: 'n', v: 885400, f: 'SUM(D2:D15)' };
+  ws1['E16'] = { t: 'n', v: 476800, f: 'SUM(E2:E15)' };
+  ws1['F16'] = { t: 'n', v: 16650, f: 'SUM(F2:F15)' };
+
   const ws2 = XLSX.utils.aoa_to_sheet(monthlyTrend);
   const ws3 = XLSX.utils.aoa_to_sheet(yearlyByRegion);
 

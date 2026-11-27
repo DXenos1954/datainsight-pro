@@ -12,6 +12,7 @@ export interface CleaningOptions {
   removeDuplicates: boolean;
   missingValueStrategy: MissingValueStrategy;
   trimWhitespace: boolean;
+  autoFixErrors: boolean;
 }
 
 export interface CleaningStats {
@@ -24,6 +25,45 @@ export interface CleaningStats {
   removedDuplicateRows: number;
   numericColumns: string[];
   categoricalColumns: string[];
+}
+
+export type ValidationIssueType =
+  | 'formula_mismatch'
+  | 'excel_error'
+  | 'math_expression'
+  | 'format_error'
+  | 'summary_mismatch'
+  | 'outlier_warning';
+
+export type ValidationSeverity = 'error' | 'warning' | 'fixed';
+
+export interface ValidationIssue {
+  id: string;
+  cellRef: string;
+  rowIndex: number;
+  column: string;
+  type: ValidationIssueType;
+  severity: ValidationSeverity;
+  formula?: string;
+  originalValue: string;
+  correctedValue: string;
+  message: string;
+  autoFixed: boolean;
+}
+
+export interface ValidationReport {
+  totalFormulas: number;
+  validFormulas: number;
+  fixedFormulaMismatches: number;
+  fixedExcelErrors: number;
+  fixedMathExpressions: number;
+  fixedFormatErrors: number;
+  summaryRowDiscrepancies: number;
+  outlierWarnings: number;
+  totalErrorsFound: number;
+  totalAutoFixed: number;
+  healthScore: number;
+  issues: ValidationIssue[];
 }
 
 export interface FullStats {
@@ -103,4 +143,74 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+}
+
+// Auth, Billing & Admin types
+export type UserRole = 'user' | 'admin';
+export type PlanId = 'free' | 'starter' | 'pro_pack' | 'ultimate' | 'pro_monthly';
+export type SubscriptionStatus = 'inactive' | 'active' | 'pending' | 'cancelled';
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  plan: PlanId;
+  credits: number; // -1 means unlimited
+  subscriptionStatus: SubscriptionStatus;
+  subscriptionExpiresAt: string | null;
+  isActive: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface PlanInfo {
+  id: PlanId;
+  name: string;
+  priceEur: number;
+  billingType: 'free' | 'one_time' | 'monthly';
+  credits: number; // -1 for unlimited
+  badge?: string;
+  description: string;
+  features: string[];
+}
+
+export interface PaymentRecord {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  planId: PlanId;
+  planName: string;
+  amountEur: number;
+  currency: string;
+  billingType: 'one_time' | 'monthly';
+  provider: 'stripe' | 'manual' | 'demo';
+  providerRef: string;
+  status: 'pending' | 'paid' | 'rejected' | 'refunded';
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ActivityLogEntry {
+  id: string;
+  userId: string | null;
+  userEmail: string;
+  action: string;
+  details: string;
+  createdAt: string;
+}
+
+export interface AdminOverview {
+  totalUsers: number;
+  activeUsers: number;
+  paidUsers: number;
+  totalRevenueEur: number;
+  pendingPayments: number;
+  totalAnalyses: number;
+  dbEngine: 'postgresql' | 'local-json';
+  stripeConfigured: boolean;
+  geminiConfigured: boolean;
+  geminiModel: string;
 }
