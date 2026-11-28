@@ -21,6 +21,7 @@ import {
   CleaningOptions,
   DataInsight,
   DataRow,
+  PaymentSettings,
   PlanInfo,
   UserProfile,
   WorkspaceTab,
@@ -70,7 +71,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [plans, setPlans] = useState<PlanInfo[]>([]);
+  const [vivaConfigured, setVivaConfigured] = useState(false);
   const [stripeConfigured, setStripeConfigured] = useState(false);
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings | null>(null);
   const [showBillingModal, setShowBillingModal] = useState(false);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [paymentBanner, setPaymentBanner] = useState<string | null>(null);
@@ -110,7 +113,9 @@ export default function App() {
         const payload = await res.json();
         setCurrentUser(payload.user || null);
         setPlans(Array.isArray(payload.plans) ? payload.plans : []);
+        setVivaConfigured(Boolean(payload.vivaConfigured));
         setStripeConfigured(Boolean(payload.stripeConfigured));
+        setPaymentSettings(payload.paymentSettings || null);
       }
     } catch {
       // ignore network boot errors
@@ -879,7 +884,9 @@ export default function App() {
         onClose={() => setShowBillingModal(false)}
         user={currentUser}
         plans={plans}
+        vivaConfigured={vivaConfigured}
         stripeConfigured={stripeConfigured}
+        paymentSettings={paymentSettings}
         onUserUpdated={(updated) => setCurrentUser(updated)}
       />
 

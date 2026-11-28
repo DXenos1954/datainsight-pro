@@ -175,6 +175,22 @@ export interface PlanInfo {
   features: string[];
 }
 
+export type PaymentProvider = 'viva' | 'stripe' | 'iris' | 'web_banking' | 'manual' | 'demo';
+
+export interface PaymentSettings {
+  bankName: string;
+  iban: string;
+  beneficiaryName: string;
+  bicSwift: string;
+  irisEnabled: boolean;
+  irisIdentifier: string;
+  irisRecipientName: string;
+  webBankingEnabled: boolean;
+  vivaEnabled: boolean;
+  stripeEnabled: boolean;
+  paymentInstructions: string;
+}
+
 export interface PaymentRecord {
   id: string;
   userId: string;
@@ -185,7 +201,7 @@ export interface PaymentRecord {
   amountEur: number;
   currency: string;
   billingType: 'one_time' | 'monthly';
-  provider: 'stripe' | 'manual' | 'demo';
+  provider: PaymentProvider;
   providerRef: string;
   status: 'pending' | 'paid' | 'rejected' | 'refunded';
   note: string;
@@ -210,6 +226,7 @@ export interface AdminOverview {
   pendingPayments: number;
   totalAnalyses: number;
   dbEngine: 'postgresql' | 'local-json';
+  vivaConfigured: boolean;
   stripeConfigured: boolean;
   geminiConfigured: boolean;
   geminiModel: string;

@@ -5,7 +5,9 @@ import { fileURLToPath } from 'url';
 import { Pool } from 'pg';
 import {
   ActivityLogEntry,
+  PaymentProvider,
   PaymentRecord,
+  PaymentSettings,
   PlanId,
   SubscriptionStatus,
   UserProfile,
@@ -26,6 +28,24 @@ interface LocalDbSchema {
   users: StoredUser[];
   payments: PaymentRecord[];
   logs: ActivityLogEntry[];
+  paymentSettings?: PaymentSettings;
+}
+
+function getDefaultPaymentSettings(): PaymentSettings {
+  return {
+    bankName: (process.env.BANK_NAME || 'Ελληνική Τράπεζα (ορίστε από το Πάνελ Διαχειριστή)').trim(),
+    iban: (process.env.BANK_IBAN || '').trim(),
+    beneficiaryName: (process.env.BANK_BENEFICIARY || 'DataInsight Pro').trim(),
+    bicSwift: (process.env.BANK_BIC || '').trim(),
+    irisEnabled: true,
+    irisIdentifier: (process.env.IRIS_IDENTIFIER || '').trim(),
+    irisRecipientName: (process.env.IRIS_RECIPIENT_NAME || process.env.BANK_BENEFICIARY || 'DataInsight Pro').trim(),
+    webBankingEnabled: true,
+    vivaEnabled: true,
+    stripeEnabled: true,
+    paymentInstructions:
+      'Αναγράψτε υποχρεωτικά τον κωδικό αναφοράς (DIP-...) στην αιτιολογία της πληρωμής για άμεση ενεργοποίηση του πακέτου σας.',
+  };
 }
 
 export function hashPassword(password: string): string {
@@ -138,6 +158,12 @@ class HybridDatabase {
         details TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -153,9 +179,17 @@ class HybridDatabase {
           users: Array.isArray(parsed.users) ? parsed.users : [],
           payments: Array.isArray(parsed.payments) ? parsed.payments : [],
           logs: Array.isArray(parsed.logs) ? parsed.logs : [],
+          paymentSettings: parsed.paymentSettings
+            ? { ...getDefaultPaymentSettings(), ...parsed.paymentSettings }
+            : getDefaultPaymentSettings(),
         };
       } else {
-        this.localCache = { users: [], payments: [], logs: [] };
+        this.localCache = {
+          users: [],
+          payments: [],
+          logs: [],
+          paymentSettings: getDefaultPaymentSettings(),
+        };
         this.saveLocalDb();
       }
     } catch (err) {
@@ -247,7 +281,7 @@ class HybridDatabase {
       amountEur: Number(row.amount_eur),
       currency: String(row.currency),
       billingType: row.billing_type as 'one_time' | 'monthly',
-      provider: row.provider as 'stripe' | 'manual' | 'demo',
+      provider: row.provider as PaymentProvider,
       providerRef: String(row.provider_ref),
       status: row.status as PaymentRecord['status'],
       note: String(row.note || ''),
@@ -513,6 +547,58 @@ class HybridDatabase {
       this.localCache.logs = this.localCache.logs.slice(0, 500);
     }
     this.saveLocalDb();
+  }
+
+  public async findPaymentByProviderRef(providerRef: string): Promise<PaymentRecord | null> {
+    if (this.pool) {
+      const res = await this.pool.query(
+        'SELECT * FROM payments WHERE provider_ref = $1 LIMIT 1',
+        [providerRef]
+      );
+      return res.rows[0] ? this.mapPgPayment(res.rows[0]) : null;
+    }
+    return this.localCache.payments.find((p) => p.providerRef === providerRef) || null;
+  }
+
+  public async getPaymentSettings(): Promise<PaymentSettings> {
+    const defaults = getDefaultPaymentSettings();
+    if (this.pool) {
+      const res = await this.pool.query(
+        'SELECT value FROM app_settings WHERE key = $1 LIMIT 1',
+        ['payment_settings']
+      );
+      if (res.rows[0]?.value) {
+        try {
+          return { ...defaults, ...(JSON.parse(String(res.rows[0].value)) as Partial<PaymentSettings>) };
+        } catch {
+          return defaults;
+        }
+      }
+      return defaults;
+    }
+    return { ...defaults, ...(this.localCache.paymentSettings || {}) };
+  }
+
+  public async updatePaymentSettings(
+    updates: Partial<PaymentSettings>
+  ): Promise<PaymentSettings> {
+    const current = await this.getPaymentSettings();
+    const merged: PaymentSettings = {
+      ...current,
+      ...updates,
+    };
+    if (this.pool) {
+      await this.pool.query(
+        `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+        ['payment_settings', JSON.stringify(merged), new Date().toISOString()]
+      );
+      return merged;
+    }
+    this.localCache.paymentSettings = merged;
+    this.saveLocalDb();
+    return merged;
   }
 
   public async listLogs(limit = 100): Promise<ActivityLogEntry[]> {

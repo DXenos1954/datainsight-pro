@@ -8,7 +8,9 @@ import {
   Database,
   Loader2,
   RefreshCw,
+  Save,
   Search,
+  Settings,
   Shield,
   Trash2,
   Users,
@@ -17,7 +19,9 @@ import {
 import {
   ActivityLogEntry,
   AdminOverview,
+  PaymentProvider,
   PaymentRecord,
+  PaymentSettings,
   PlanId,
   UserProfile,
   UserRole,
@@ -30,7 +34,7 @@ interface AdminPanelProps {
   onRefreshCurrentUser: () => void;
 }
 
-type AdminTab = 'overview' | 'users' | 'payments' | 'logs';
+type AdminTab = 'overview' | 'users' | 'payments' | 'settings' | 'logs';
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
   currentUser,
@@ -42,6 +46,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [logs, setLogs] = useState<ActivityLogEntry[]>([]);
+  const [paySettings, setPaySettings] = useState<PaymentSettings | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+
   const [userSearch, setUserSearch] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'all' | PaymentRecord['status']>('all');
   const [isLoading, setIsLoading] = useState(true);
@@ -58,23 +65,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setIsLoading(true);
     setError(null);
     try {
-      const [ovRes, uRes, pRes, lRes] = await Promise.all([
+      const [ovRes, uRes, pRes, lRes, sRes] = await Promise.all([
         fetch('/api/admin/overview'),
         fetch('/api/admin/users'),
         fetch('/api/admin/payments'),
         fetch('/api/admin/logs'),
+        fetch('/api/admin/payment-settings'),
       ]);
       if (!ovRes.ok) throw new Error('Αποτυχία φόρτωσης δεδομένων διαχειριστή.');
-      const [ovData, uData, pData, lData] = await Promise.all([
+      const [ovData, uData, pData, lData, sData] = await Promise.all([
         ovRes.json(),
         uRes.json(),
         pRes.json(),
         lRes.json(),
+        sRes.json(),
       ]);
       setOverview(ovData);
       setUsers(uData.users || []);
       setPayments(pData.payments || []);
       setLogs(lData.logs || []);
+      if (sData.settings) setPaySettings(sData.settings);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Σφάλμα φόρτωσης.');
     } finally {
@@ -85,6 +95,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  const handleSavePaymentSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!paySettings) return;
+    setSavingSettings(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/admin/payment-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(paySettings),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Αποτυχία αποθήκευσης.');
+      setPaySettings(data.settings);
+      onRefreshCurrentUser();
+      showToast('Οι ρυθμίσεις πληρωμών (IBAN / IRIS / Κάρτες) αποθηκεύτηκαν!');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Σφάλμα αποθήκευσης.');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
 
   const handleUpdateUser = async (
     userId: string,
@@ -155,6 +188,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  const providerLabel = (provider: PaymentProvider) => {
+    switch (provider) {
+      case 'viva':
+        return 'VIVA.COM';
+      case 'stripe':
+        return 'STRIPE';
+      case 'iris':
+        return 'IRIS';
+      case 'web_banking':
+      case 'manual':
+        return 'WEB BANKING';
+      case 'demo':
+        return 'SANDBOX';
+    }
+  };
+
   const filteredUsers = users.filter((u) => {
     const q = userSearch.trim().toLowerCase();
     if (!q) return true;
@@ -169,6 +218,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     paymentFilter === 'all'
       ? payments
       : payments.filter((p) => p.status === paymentFilter);
+
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
   return (
     <div className="space-y-6">
@@ -188,21 +239,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               Πάνελ Διαχειριστή — DataInsight Pro
             </h1>
             <p className="text-xs text-slate-500">
-              Διαχείριση χρηστών, πακέτων συνδρομής, εγκρίσεων πληρωμών και συστήματος.
+              Διαχείριση χρηστών, πακέτων, πληρωμών (Viva.com · Stripe · IRIS · Web Banking) και συστήματος.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={loadAll}
-            disabled={isLoading}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors"
-          >
-            <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
-            Ανανέωση
-          </button>
-        </div>
+        <button
+          onClick={loadAll}
+          disabled={isLoading}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors self-start sm:self-center"
+        >
+          <RefreshCw className={cn('w-3.5 h-3.5', isLoading && 'animate-spin')} />
+          Ανανέωση
+        </button>
       </div>
 
       {/* Sub-navigation */}
@@ -219,6 +268,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             label: `Πληρωμές (${payments.length})`,
             icon: <CreditCard className="w-3.5 h-3.5" />,
             badge: overview?.pendingPayments || 0,
+          },
+          {
+            id: 'settings' as AdminTab,
+            label: 'Ρυθμίσεις Πληρωμών',
+            icon: <Settings className="w-3.5 h-3.5" />,
           },
           {
             id: 'logs' as AdminTab,
@@ -302,37 +356,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
               <div className="bg-white rounded-xl border border-slate-200 p-6">
                 <h2 className="text-sm font-semibold text-slate-900 mb-4">
-                  Κατάσταση Υποδομής &amp; Υπηρεσιών
+                  Κατάσταση Υποδομής &amp; Πυλών Πληρωμής
                 </h2>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
                   <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
                     <p className="text-slate-500">Βάση Δεδομένων</p>
                     <p className="font-semibold text-slate-900 mt-1">
                       {overview.dbEngine === 'postgresql'
-                        ? 'PostgreSQL (DATABASE_URL — Μόνιμη)'
-                        : 'Τοπική Αποθήκευση (data/datainsight-db.json)'}
+                        ? 'PostgreSQL (Μόνιμη)'
+                        : 'Τοπικό αρχείο JSON'}
                     </p>
                     <p className="text-[11px] text-slate-500 mt-1">
                       {overview.dbEngine === 'postgresql'
-                        ? 'Συνδεδεμένη σε εξωτερική βάση PostgreSQL.'
-                        : 'Ορίστε DATABASE_URL στο Render για μόνιμη PostgreSQL.'}
+                        ? 'Συνδεδεμένη μέσω DATABASE_URL.'
+                        : 'Βάλτε DATABASE_URL στο Render για PostgreSQL.'}
                     </p>
                   </div>
 
                   <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                    <p className="text-slate-500">Πύλη Πληρωμών Stripe</p>
+                    <p className="text-slate-500">Viva.com (Κάρτα &amp; Αυτόματο IRIS)</p>
+                    <p
+                      className={cn(
+                        'font-semibold mt-1',
+                        overview.vivaConfigured ? 'text-emerald-700' : 'text-amber-700'
+                      )}
+                    >
+                      {overview.vivaConfigured ? 'Ενεργό' : 'Μη ρυθμισμένο'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Απαιτεί VIVA_CLIENT_ID, VIVA_CLIENT_SECRET &amp; VIVA_SOURCE_CODE.
+                    </p>
+                  </div>
+
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <p className="text-slate-500">Stripe (Κάρτες &amp; Συνδρομές)</p>
                     <p
                       className={cn(
                         'font-semibold mt-1',
                         overview.stripeConfigured ? 'text-emerald-700' : 'text-amber-700'
                       )}
                     >
-                      {overview.stripeConfigured
-                        ? 'Ενεργό (Live / Test API Key)'
-                        : 'Μη ρυθμισμένο (Ενεργή Κατάθεση & Sandbox)'}
+                      {overview.stripeConfigured ? 'Ενεργό' : 'Μη ρυθμισμένο'}
                     </p>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Πακέτα: Starter €20 · Pro Pack €35 · Ultimate €50 · Pro Monthly €60/μήνα
+                      Απαιτεί STRIPE_SECRET_KEY &amp; STRIPE_WEBHOOK_SECRET.
                     </p>
                   </div>
 
@@ -349,7 +416,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         : 'Λείπει το GEMINI_API_KEY'}
                     </p>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Ρυθμίζεται από τα Environment Variables του server.
+                      Πακέτα: Starter €20 · Pro €35 · Ultimate €50 · Monthly €60
                     </p>
                   </div>
                 </div>
@@ -557,7 +624,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                             </td>
                             <td className="px-4 py-3">
                               <p className="font-mono text-[11px] text-slate-700">
-                                {p.provider.toUpperCase()} · {p.providerRef}
+                                {providerLabel(p.provider)} · {p.providerRef}
                               </p>
                               {p.note && (
                                 <p className="text-[11px] text-slate-500 truncate max-w-xs">
@@ -620,7 +687,202 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           )}
 
-          {/* TAB 4: ACTIVITY LOGS */}
+          {/* TAB 4: PAYMENT SETTINGS (IBAN / IRIS / VIVA / STRIPE) */}
+          {tab === 'settings' && paySettings && (
+            <form
+              onSubmit={handleSavePaymentSettings}
+              className="bg-white rounded-xl border border-slate-200 p-6 space-y-6"
+            >
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Ρυθμίσεις Τρόπων Πληρωμής (IRIS, Web Banking / IBAN, Viva.com &amp; Stripe)
+                </h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  Τα στοιχεία που αποθηκεύετε εδώ εμφανίζονται άμεσα στους χρήστες στο παράθυρο πληρωμών.
+                </p>
+              </div>
+
+              {/* Method Enable Toggles */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <label className="inline-flex items-center gap-2 font-medium text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={paySettings.irisEnabled}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, irisEnabled: e.target.checked })
+                    }
+                    className="rounded border-slate-300 text-blue-600"
+                  />
+                  Απευθείας IRIS (0% προμήθεια)
+                </label>
+
+                <label className="inline-flex items-center gap-2 font-medium text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={paySettings.webBankingEnabled}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, webBankingEnabled: e.target.checked })
+                    }
+                    className="rounded border-slate-300 text-blue-600"
+                  />
+                  Web Banking / IBAN
+                </label>
+
+                <label className="inline-flex items-center gap-2 font-medium text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={paySettings.vivaEnabled}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, vivaEnabled: e.target.checked })
+                    }
+                    className="rounded border-slate-300 text-blue-600"
+                  />
+                  Viva.com (Κάρτα &amp; IRIS)
+                </label>
+
+                <label className="inline-flex items-center gap-2 font-medium text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={paySettings.stripeEnabled}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, stripeEnabled: e.target.checked })
+                    }
+                    className="rounded border-slate-300 text-blue-600"
+                  />
+                  Stripe (Κάρτα)
+                </label>
+              </div>
+
+              {/* IRIS & Bank Details */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    ΑΦΜ ή Κινητό για IRIS Payments
+                  </label>
+                  <input
+                    type="text"
+                    value={paySettings.irisIdentifier}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, irisIdentifier: e.target.value })
+                    }
+                    placeholder="π.χ. 123456789 (ΑΦΜ) ή 69XXXXXXXX"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Όνομα Δικαιούχου IRIS
+                  </label>
+                  <input
+                    type="text"
+                    value={paySettings.irisRecipientName}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, irisRecipientName: e.target.value })
+                    }
+                    placeholder="π.χ. ΔΗΜΗΤΡΙΟΣ ΞΕΝΟΣ / DataInsight Pro"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Τράπεζα (Web Banking)
+                  </label>
+                  <input
+                    type="text"
+                    value={paySettings.bankName}
+                    onChange={(e) => setPaySettings({ ...paySettings, bankName: e.target.value })}
+                    placeholder="π.χ. Eurobank / Alpha Bank / Πειραιώς / Εθνική"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Δικαιούχος Τραπεζικού Λογαριασμού
+                  </label>
+                  <input
+                    type="text"
+                    value={paySettings.beneficiaryName}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, beneficiaryName: e.target.value })
+                    }
+                    placeholder="Όνομα δικαιούχου"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">IBAN</label>
+                  <input
+                    type="text"
+                    value={paySettings.iban}
+                    onChange={(e) => setPaySettings({ ...paySettings, iban: e.target.value })}
+                    placeholder="GR16 0110 1250 0000 0001 2300 695"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">
+                    BIC / SWIFT (προαιρετικά)
+                  </label>
+                  <input
+                    type="text"
+                    value={paySettings.bicSwift}
+                    onChange={(e) => setPaySettings({ ...paySettings, bicSwift: e.target.value })}
+                    placeholder="π.χ. ERBKGRAA / PIRBGRAA / ETHNGRAA"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white font-mono"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block font-medium text-slate-700 mb-1">
+                    Οδηγίες προς τον χρήστη
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={paySettings.paymentInstructions}
+                    onChange={(e) =>
+                      setPaySettings({ ...paySettings, paymentInstructions: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                  />
+                </div>
+              </div>
+
+              {/* Webhook Reference Box */}
+              <div className="p-4 rounded-xl bg-blue-50/60 border border-blue-200 text-xs space-y-1.5">
+                <p className="font-semibold text-blue-900">
+                  Webhooks για αυτόματη ενεργοποίηση (Viva.com &amp; Stripe):
+                </p>
+                <p className="font-mono text-[11px] text-blue-800 break-all">
+                  Viva.com Webhook: {currentOrigin}/api/billing/viva-webhook
+                </p>
+                <p className="font-mono text-[11px] text-blue-800 break-all">
+                  Stripe Webhook: {currentOrigin}/api/billing/webhook
+                </p>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={savingSettings}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-lg transition-colors"
+                >
+                  {savingSettings ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  Αποθήκευση Ρυθμίσεων Πληρωμών
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* TAB 5: ACTIVITY LOGS */}
           {tab === 'logs' && (
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className="px-5 py-4 border-b border-slate-100">

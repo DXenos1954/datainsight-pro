@@ -340,7 +340,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ plans, onAuthenticated }) =>
               </div>
               <div className="flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                <span>Πληρωμές με κάρτα (Stripe) ή τραπεζική κατάθεση / IRIS</span>
+                <span>Πληρωμές με Κάρτα (Viva.com / Stripe), IRIS &amp; Web Banking (IBAN)</span>
               </div>
             </div>
           </div>

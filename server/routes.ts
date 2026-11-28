@@ -10,11 +10,39 @@ import {
 } from './auth';
 import { db, hashPassword, sanitizeUser, verifyPassword } from './db';
 import { isValidPlanId, PAID_PLAN_LIST, PLANS } from './plans';
-import { PaymentRecord, PlanId, SubscriptionStatus, UserRole } from '../src/types';
+import {
+  PaymentRecord,
+  PaymentSettings,
+  PlanId,
+  SubscriptionStatus,
+  UserRole,
+} from '../src/types';
 
 function isStripeConfigured(): boolean {
   const key = (process.env.STRIPE_SECRET_KEY || '').trim();
   return key.startsWith('sk_');
+}
+
+function isVivaConfigured(): boolean {
+  const clientId = (process.env.VIVA_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.VIVA_CLIENT_SECRET || '').trim();
+  const sourceCode = (process.env.VIVA_SOURCE_CODE || '').trim();
+  return Boolean(clientId && clientSecret && sourceCode);
+}
+
+function getVivaHosts(): { accountsHost: string; apiHost: string; checkoutHost: string } {
+  const isDemo = (process.env.VIVA_DEMO_MODE || '').trim().toLowerCase() === 'true';
+  return isDemo
+    ? {
+        accountsHost: 'https://demo-accounts.vivapayments.com',
+        apiHost: 'https://demo-api.vivapayments.com',
+        checkoutHost: 'https://demo.vivapayments.com',
+      }
+    : {
+        accountsHost: 'https://accounts.vivapayments.com',
+        apiHost: 'https://api.vivapayments.com',
+        checkoutHost: 'https://www.vivapayments.com',
+      };
 }
 
 function getBaseUrl(req: Request): string {
@@ -23,6 +51,77 @@ function getBaseUrl(req: Request): string {
   const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
   const host = req.headers.host || 'localhost:3000';
   return `${proto}://${host}`;
+}
+
+async function getVivaAccessToken(): Promise<string> {
+  const clientId = (process.env.VIVA_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.VIVA_CLIENT_SECRET || '').trim();
+  const { accountsHost } = getVivaHosts();
+  const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+  const res = await fetch(`${accountsHost}/connect/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basicAuth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+
+  const data = (await res.json()) as { access_token?: string; error?: string };
+  if (!res.ok || !data.access_token) {
+    throw new Error(data.error || 'Αποτυχία αυθεντικοποίησης με Viva.com.');
+  }
+  return data.access_token;
+}
+
+async function createVivaCheckoutOrder(params: {
+  planId: PlanId;
+  userEmail: string;
+  userName: string;
+  paymentId: string;
+}): Promise<{ orderCode: string; checkoutUrl: string }> {
+  const token = await getVivaAccessToken();
+  const { apiHost, checkoutHost } = getVivaHosts();
+  const sourceCode = (process.env.VIVA_SOURCE_CODE || '').trim();
+  const plan = PLANS[params.planId];
+
+  const orderBody = {
+    amount: Math.round(plan.priceEur * 100),
+    customerTrns: `DataInsight Pro — ${plan.name}`,
+    customer: {
+      email: params.userEmail,
+      fullName: params.userName,
+      countryCode: 'GR',
+      requestLang: 'el-GR',
+    },
+    sourceCode,
+    merchantTrns: params.paymentId,
+    allowRecurring: plan.billingType === 'monthly',
+    paymentTimeout: 1800,
+    disableCash: true,
+    disableWallet: false,
+  };
+
+  const res = await fetch(`${apiHost}/checkout/v2/orders`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(orderBody),
+  });
+
+  const data = (await res.json()) as { orderCode?: number | string; message?: string };
+  if (!res.ok || !data.orderCode) {
+    throw new Error(data.message || 'Αποτυχία δημιουργίας παραγγελίας Viva.com Smart Checkout.');
+  }
+
+  const orderCode = String(data.orderCode);
+  return {
+    orderCode,
+    checkoutUrl: `${checkoutHost}/web/checkout?ref=${encodeURIComponent(orderCode)}`,
+  };
 }
 
 async function createStripeCheckoutSession(params: {
@@ -157,12 +256,17 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
   // ---------------- AUTH ROUTES ----------------
   app.get('/api/auth/me', async (req: Request, res: Response) => {
     try {
-      const user = await getRequestUser(req);
+      const [user, paymentSettings] = await Promise.all([
+        getRequestUser(req),
+        db.getPaymentSettings(),
+      ]);
       res.json({
         user: user ? sanitizeUser(user) : null,
         plans: PAID_PLAN_LIST,
         freePlan: PLANS.free,
+        vivaConfigured: isVivaConfigured(),
         stripeConfigured: isStripeConfigured(),
+        paymentSettings,
       });
     } catch (err) {
       console.error('Error in /api/auth/me:', err);
@@ -261,11 +365,14 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
   });
 
   // ---------------- BILLING / PAYMENTS ROUTES ----------------
-  app.get('/api/billing/plans', (_req: Request, res: Response) => {
+  app.get('/api/billing/plans', async (_req: Request, res: Response) => {
+    const paymentSettings = await db.getPaymentSettings();
     res.json({
       plans: PAID_PLAN_LIST,
       freePlan: PLANS.free,
+      vivaConfigured: isVivaConfigured(),
       stripeConfigured: isStripeConfigured(),
+      paymentSettings,
     });
   });
 
@@ -279,6 +386,58 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
     }
   });
 
+  // Viva.com Webhook verification (GET) + Event handler (POST)
+  app.get('/api/billing/viva-webhook', (_req: Request, res: Response) => {
+    const key = (process.env.VIVA_WEBHOOK_KEY || '').trim();
+    if (!key) {
+      res.status(400).json({ error: 'VIVA_WEBHOOK_KEY is not configured' });
+      return;
+    }
+    res.json({ Key: key });
+  });
+
+  app.post('/api/billing/viva-webhook', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as {
+        EventTypeId?: number;
+        EventData?: {
+          OrderCode?: number | string;
+          MerchantTrns?: string;
+          StatusId?: string;
+          TransactionId?: string;
+        };
+      };
+
+      // EventTypeId 1796 = Transaction Payment Created (StatusId 'F' = Finished/Paid)
+      if (body?.EventTypeId === 1796 && body.EventData?.StatusId === 'F') {
+        const merchantTrns = String(body.EventData.MerchantTrns || '').trim();
+        const orderCode = String(body.EventData.OrderCode || '').trim();
+        const existing =
+          (merchantTrns ? await db.findPaymentById(merchantTrns) : null) ||
+          (orderCode ? await db.findPaymentByProviderRef(orderCode) : null);
+
+        if (existing && existing.status !== 'paid') {
+          await db.updatePaymentStatus(
+            existing.id,
+            'paid',
+            `Επιβεβαιώθηκε αυτόματα μέσω Viva.com (Tx: ${body.EventData.TransactionId || orderCode})`
+          );
+          await db.grantPlanToUser(existing.userId, existing.planId);
+          await db.addLog(
+            existing.userId,
+            existing.userEmail,
+            'payment',
+            `Αυτόματη πληρωμή Viva.com (${existing.planName} — €${existing.amountEur})`
+          );
+        }
+      }
+      res.json({ received: true });
+    } catch (err) {
+      console.error('Error in /api/billing/viva-webhook:', err);
+      res.status(400).json({ error: 'Viva webhook error' });
+    }
+  });
+
   app.post('/api/billing/checkout', requireAuth, async (req: AuthedRequest, res: Response) => {
     try {
       const { planId, method, referenceNote } = req.body ?? {};
@@ -289,23 +448,72 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
 
       const plan = PLANS[planId];
       const user = req.user!;
+      const settings = await db.getPaymentSettings();
       const now = new Date().toISOString();
       const paymentId = `pay_${crypto.randomUUID().slice(0, 12)}`;
       const shortCode = `DIP-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
-      const requestedMethod =
-        method === 'stripe' || method === 'manual' || method === 'demo'
-          ? method
+      const validMethods = new Set(['viva', 'stripe', 'iris', 'web_banking', 'manual', 'demo']);
+      const requestedMethod = validMethods.has(method)
+        ? (method as 'viva' | 'stripe' | 'iris' | 'web_banking' | 'manual' | 'demo')
+        : isVivaConfigured()
+          ? 'viva'
           : isStripeConfigured()
             ? 'stripe'
-            : 'manual';
+            : 'iris';
 
-      // 1. Live Stripe Checkout
-      if (requestedMethod === 'stripe') {
-        if (!isStripeConfigured()) {
+      // 1. Live Viva.com Smart Checkout (Cards + Automatic IRIS + Apple/Google Pay)
+      if (requestedMethod === 'viva') {
+        if (!isVivaConfigured() || !settings.vivaEnabled) {
           res.status(400).json({
             error:
-              'Το Stripe δεν έχει ρυθμιστεί ακόμα στον server (λείπει το STRIPE_SECRET_KEY). Χρησιμοποιήστε Τραπεζική Κατάθεση ή Δοκιμαστική Πληρωμή.',
+              'Το Viva.com Smart Checkout δεν έχει ρυθμιστεί ακόμα στον server (λείπουν VIVA_CLIENT_ID / VIVA_CLIENT_SECRET / VIVA_SOURCE_CODE). Επιλέξτε Απευθείας IRIS, Web Banking ή Stripe.',
+          });
+          return;
+        }
+
+        const order = await createVivaCheckoutOrder({
+          planId,
+          userEmail: user.email,
+          userName: user.name,
+          paymentId,
+        });
+
+        const record: PaymentRecord = {
+          id: paymentId,
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.name,
+          planId,
+          planName: plan.name,
+          amountEur: plan.priceEur,
+          currency: 'EUR',
+          billingType: plan.billingType === 'monthly' ? 'monthly' : 'one_time',
+          provider: 'viva',
+          providerRef: order.orderCode,
+          status: 'pending',
+          note: 'Viva.com Smart Checkout (Κάρτα / Αυτόματο IRIS)',
+          createdAt: now,
+          updatedAt: now,
+        };
+        await db.createPayment(record);
+        await db.addLog(
+          user.id,
+          user.email,
+          'payment',
+          `Έναρξη Viva.com Smart Checkout για ${plan.name} (€${plan.priceEur})`
+        );
+
+        res.json({ checkoutUrl: order.checkoutUrl, payment: record });
+        return;
+      }
+
+      // 2. Live Stripe Checkout (Cards + Apple/Google Pay + Subscriptions)
+      if (requestedMethod === 'stripe') {
+        if (!isStripeConfigured() || !settings.stripeEnabled) {
+          res.status(400).json({
+            error:
+              'Το Stripe δεν έχει ρυθμιστεί ακόμα στον server (λείπει το STRIPE_SECRET_KEY). Επιλέξτε IRIS, Web Banking ή Viva.com.',
           });
           return;
         }
@@ -347,12 +555,16 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
         return;
       }
 
-      // 2. Manual bank transfer / IRIS request (requires Admin approval)
-      if (requestedMethod === 'manual') {
+      // 3. Direct IRIS payment (0% fee, Admin confirms)
+      if (requestedMethod === 'iris') {
+        if (!settings.irisEnabled) {
+          res.status(400).json({ error: 'Η πληρωμή μέσω IRIS είναι προσωρινά απενεργοποιημένη.' });
+          return;
+        }
         const cleanNote =
           typeof referenceNote === 'string' && referenceNote.trim()
             ? referenceNote.trim().slice(0, 240)
-            : `Κωδικός αναφοράς κατάθεσης: ${shortCode}`;
+            : `Πληρωμή IRIS — Αιτιολογία: ${shortCode}`;
 
         const record: PaymentRecord = {
           id: paymentId,
@@ -364,7 +576,7 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
           amountEur: plan.priceEur,
           currency: 'EUR',
           billingType: plan.billingType === 'monthly' ? 'monthly' : 'one_time',
-          provider: 'manual',
+          provider: 'iris',
           providerRef: shortCode,
           status: 'pending',
           note: cleanNote,
@@ -376,20 +588,67 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
           user.id,
           user.email,
           'payment',
-          `Αίτημα πληρωμής ${plan.name} (€${plan.priceEur}) — Κωδικός: ${shortCode}`
+          `Αίτημα πληρωμής IRIS για ${plan.name} (€${plan.priceEur}) — Κωδικός: ${shortCode}`
         );
 
         res.status(201).json({
           payment: record,
-          message: `Το αίτημα πληρωμής καταχωρήθηκε με κωδικό ${shortCode}. Μόλις εγκριθεί από τον διαχειριστή, το πακέτο ${plan.name} θα ενεργοποιηθεί αυτόματα.`,
+          referenceCode: shortCode,
+          message: `Η παραγγελία IRIS καταχωρήθηκε με κωδικό αιτιολογίας ${shortCode}. Ολοκληρώστε τη μεταφορά €${plan.priceEur} μέσω IRIS και το πακέτο ${plan.name} θα ενεργοποιηθεί άμεσα μόλις επιβεβαιωθεί.`,
         });
         return;
       }
 
-      // 3. Sandbox Demo Checkout (only allowed when live Stripe is not configured)
-      if (isStripeConfigured()) {
+      // 4. Direct Web Banking / IBAN transfer (0% fee, Admin confirms)
+      if (requestedMethod === 'web_banking' || requestedMethod === 'manual') {
+        if (!settings.webBankingEnabled && requestedMethod === 'web_banking') {
+          res.status(400).json({
+            error: 'Η τραπεζική κατάθεση / Web Banking είναι προσωρινά απενεργοποιημένη.',
+          });
+          return;
+        }
+        const cleanNote =
+          typeof referenceNote === 'string' && referenceNote.trim()
+            ? referenceNote.trim().slice(0, 240)
+            : `Web Banking έμβασμα — Αιτιολογία: ${shortCode}`;
+
+        const record: PaymentRecord = {
+          id: paymentId,
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.name,
+          planId,
+          planName: plan.name,
+          amountEur: plan.priceEur,
+          currency: 'EUR',
+          billingType: plan.billingType === 'monthly' ? 'monthly' : 'one_time',
+          provider: 'web_banking',
+          providerRef: shortCode,
+          status: 'pending',
+          note: cleanNote,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await db.createPayment(record);
+        await db.addLog(
+          user.id,
+          user.email,
+          'payment',
+          `Αίτημα Web Banking για ${plan.name} (€${plan.priceEur}) — Κωδικός: ${shortCode}`
+        );
+
+        res.status(201).json({
+          payment: record,
+          referenceCode: shortCode,
+          message: `Η παραγγελία Web Banking καταχωρήθηκε με κωδικό αιτιολογίας ${shortCode}. Ολοκληρώστε το έμβασμα €${plan.priceEur} στο IBAN και μόλις επιβεβαιωθεί από τον διαχειριστή το πακέτο ${plan.name} θα ενεργοποιηθεί αυτόματα.`,
+        });
+        return;
+      }
+
+      // 5. Sandbox Demo Checkout (only allowed when neither Viva nor Stripe is configured)
+      if (isStripeConfigured() || isVivaConfigured()) {
         res.status(400).json({
-          error: 'Η δοκιμαστική πληρωμή είναι απενεργοποιημένη όταν το Stripe είναι ενεργό.',
+          error: 'Η δοκιμαστική πληρωμή είναι απενεργοποιημένη όταν υπάρχει ενεργή πύλη πληρωμών.',
         });
         return;
       }
@@ -458,6 +717,7 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
         pendingPayments,
         totalAnalyses,
         dbEngine: db.getEngine(),
+        vivaConfigured: isVivaConfigured(),
         stripeConfigured: isStripeConfigured(),
         geminiConfigured: Boolean(rawGeminiKey && rawGeminiKey !== 'MY_GEMINI_API_KEY'),
         geminiModel: modelName,
@@ -465,6 +725,62 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
     } catch (err) {
       console.error('Error in /api/admin/overview:', err);
       res.status(500).json({ error: 'Αποτυχία φόρτωσης στατιστικών διαχειριστή.' });
+    }
+  });
+
+  app.get('/api/admin/payment-settings', requireAdmin, async (_req: AuthedRequest, res: Response) => {
+    try {
+      const settings = await db.getPaymentSettings();
+      res.json({
+        settings,
+        vivaConfigured: isVivaConfigured(),
+        stripeConfigured: isStripeConfigured(),
+      });
+    } catch (err) {
+      console.error('Error in GET /api/admin/payment-settings:', err);
+      res.status(500).json({ error: 'Αποτυχία φόρτωσης ρυθμίσεων πληρωμών.' });
+    }
+  });
+
+  app.put('/api/admin/payment-settings', requireAdmin, async (req: AuthedRequest, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Partial<PaymentSettings>;
+      const cleanStr = (v: unknown, max = 180) =>
+        typeof v === 'string' ? v.trim().slice(0, max) : undefined;
+
+      const updates: Partial<PaymentSettings> = {};
+      const bankName = cleanStr(body.bankName, 120);
+      if (bankName !== undefined) updates.bankName = bankName;
+      const iban = cleanStr(body.iban, 60);
+      if (iban !== undefined) updates.iban = iban.toUpperCase();
+      const beneficiaryName = cleanStr(body.beneficiaryName, 140);
+      if (beneficiaryName !== undefined) updates.beneficiaryName = beneficiaryName;
+      const bicSwift = cleanStr(body.bicSwift, 32);
+      if (bicSwift !== undefined) updates.bicSwift = bicSwift.toUpperCase();
+      const irisIdentifier = cleanStr(body.irisIdentifier, 60);
+      if (irisIdentifier !== undefined) updates.irisIdentifier = irisIdentifier;
+      const irisRecipientName = cleanStr(body.irisRecipientName, 140);
+      if (irisRecipientName !== undefined) updates.irisRecipientName = irisRecipientName;
+      const paymentInstructions = cleanStr(body.paymentInstructions, 500);
+      if (paymentInstructions !== undefined) updates.paymentInstructions = paymentInstructions;
+
+      if (typeof body.irisEnabled === 'boolean') updates.irisEnabled = body.irisEnabled;
+      if (typeof body.webBankingEnabled === 'boolean')
+        updates.webBankingEnabled = body.webBankingEnabled;
+      if (typeof body.vivaEnabled === 'boolean') updates.vivaEnabled = body.vivaEnabled;
+      if (typeof body.stripeEnabled === 'boolean') updates.stripeEnabled = body.stripeEnabled;
+
+      const updated = await db.updatePaymentSettings(updates);
+      await db.addLog(
+        req.user!.id,
+        req.user!.email,
+        'admin_action',
+        'Ενημέρωση ρυθμίσεων πληρωμών (IBAN / IRIS / Viva / Stripe)'
+      );
+      res.json({ settings: updated });
+    } catch (err) {
+      console.error('Error in PUT /api/admin/payment-settings:', err);
+      res.status(500).json({ error: 'Αποτυχία αποθήκευσης ρυθμίσεων πληρωμών.' });
     }
   });
 
@@ -600,7 +916,6 @@ export function registerPlatformRoutes(app: Express, modelName: string): void {
 
       const updated = await db.updatePaymentStatus(paymentId, status, note);
 
-      // Automatically activate plan / add credits when transitioning to 'paid'
       if (status === 'paid' && existing.status !== 'paid') {
         await db.grantPlanToUser(existing.userId, existing.planId);
       }
